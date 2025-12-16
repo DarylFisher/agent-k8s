@@ -1,0 +1,85 @@
+---
+# Ingress for /admin/api - routes to agent-db-service with path rewriting
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scheduler-ingress-admin-api
+  namespace: agent-scheduler
+  labels:
+    app: scheduler
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: scheduler.local
+      http:
+        paths:
+          # Admin API routes - route to agent-db-service (with path rewriting)
+          - path: /admin/api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: agent-db-service
+                port:
+                  number: 8000
+
+---
+# Ingress for /admin UI - routes to agent-ctl-service (NO path rewriting)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scheduler-ingress-admin-ui
+  namespace: agent-scheduler
+  labels:
+    app: scheduler
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: scheduler.local
+      http:
+        paths:
+          # Admin UI routes - agent-ctl interface (NO path rewriting)
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-ctl-service
+                port:
+                  number: 3000
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scheduler-ingress
+  namespace: agent-scheduler
+  labels:
+    app: scheduler
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: scheduler.local
+      http:
+        paths:
+          # API routes - must come first for more specific matching
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: scheduler-service
+                port:
+                  number: 8000
+          # UI routes - catch all (must be last)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ui-service
+                port:
+                  number: 80

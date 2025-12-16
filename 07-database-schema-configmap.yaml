@@ -1,0 +1,346 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: database-schema
+  namespace: agent-scheduler
+  labels:
+    app: postgres
+data:
+  schema.sql: |
+    -- Scheduler Database Schema
+    -- Model 1: Containerized Scheduler
+
+    -- Extension for UUID support
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+    -- ============================================================================
+    -- Jobs Table: Stores scheduled job definitions
+    -- ============================================================================
+    CREATE TABLE scheduled_jobs (
+        job_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        job_name VARCHAR(255) NOT NULL UNIQUE,
+        description TEXT,
+
+        -- Agent execution parameters
+        warehouse VARCHAR(100) NOT NULL,
+        agent_type VARCHAR(100) NOT NULL,
+        run_mode VARCHAR(50) NOT NULL CHECK (run_mode IN ('train_agent', 'run_agent')),
+
+        -- Scheduling
+        schedule_type VARCHAR(50) NOT NULL CHECK (schedule_type IN ('cron', 'interval', 'date')),
+        cron_expression VARCHAR(100),  -- For cron schedules: "0 2 * * *"
+        interval_seconds INTEGER,       -- For interval schedules: 3600
+        scheduled_date TIMESTAMP,       -- For one-time schedules
+        timezone VARCHAR(50) DEFAULT 'UTC',
+
+        -- Job state
+        enabled BOOLEAN DEFAULT true,
+        last_run_at TIMESTAMP,
+        next_run_at TIMESTAMP,
+
+        -- Container configuration
+        container_image VARCHAR(255) DEFAULT 'pkanal:latest',
+        container_memory VARCHAR(20) DEFAULT '2g',
+        container_cpu_limit VARCHAR(10) DEFAULT '1.0',
+
+        -- Environment variable overrides (JSONB for flexibility)
+        env_overrides JSONB DEFAULT '{}'::jsonb,
+
+        -- Retry policy
+        max_retries INTEGER DEFAULT 3,
+        retry_backoff_seconds INTEGER DEFAULT 60,
+
+        -- Notifications
+        notification_emails TEXT[],  -- Array of email addresses
+        notify_on_success BOOLEAN DEFAULT false,
+        notify_on_failure BOOLEAN DEFAULT true,
+
+        -- Audit fields
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by VARCHAR(100),
+        updated_by VARCHAR(100),
+
+        -- Constraints
+        CONSTRAINT valid_schedule CHECK (
+            (schedule_type = 'cron' AND cron_expression IS NOT NULL) OR
+            (schedule_type = 'interval' AND interval_seconds IS NOT NULL) OR
+            (schedule_type = 'date' AND scheduled_date IS NOT NULL)
+        )
+    );
+
+    -- Indexes for common queries
+    CREATE INDEX idx_scheduled_jobs_enabled ON scheduled_jobs(enabled);
+    CREATE INDEX idx_scheduled_jobs_next_run ON scheduled_jobs(next_run_at) WHERE enabled = true;
+    CREATE INDEX idx_scheduled_jobs_warehouse ON scheduled_jobs(warehouse);
+
+
+    -- ============================================================================
+    -- Execution History Table: Tracks all job executions
+    -- ============================================================================
+    CREATE TABLE execution_history (
+        execution_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        job_id UUID NOT NULL REFERENCES scheduled_jobs(job_id) ON DELETE CASCADE,
+
+        -- Execution details
+        trigger_type VARCHAR(50) NOT NULL CHECK (trigger_type IN ('scheduled', 'manual', 'retry')),
+        scheduled_time TIMESTAMP,  -- When it was supposed to run
+        start_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        end_time TIMESTAMP,
+        duration_seconds INTEGER GENERATED ALWAYS AS (
+            EXTRACT(EPOCH FROM (end_time - start_time))::INTEGER
+        ) STORED,
+
+        -- Container information
+        container_id VARCHAR(255),
+        container_name VARCHAR(255),
+
+        -- Execution status
+        status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (
+            status IN ('pending', 'running', 'completed', 'failed', 'timeout', 'cancelled')
+        ),
+        exit_code INTEGER,
+
+        -- Error tracking
+        error_message TEXT,
+        error_stacktrace TEXT,
+
+        -- Retry tracking
+        retry_count INTEGER DEFAULT 0,
+        is_retry BOOLEAN DEFAULT false,
+        parent_execution_id UUID REFERENCES execution_history(execution_id),
+
+        -- Logs and output
+        log_output TEXT,  -- Captured container logs
+        log_url VARCHAR(500),  -- URL to external logging service
+
+        -- Resource usage (if captured)
+        max_memory_mb INTEGER,
+        avg_cpu_percent NUMERIC(5,2),
+
+        -- Audit
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Indexes for performance
+    CREATE INDEX idx_execution_history_job_id ON execution_history(job_id);
+    CREATE INDEX idx_execution_history_status ON execution_history(status);
+    CREATE INDEX idx_execution_history_start_time ON execution_history(start_time DESC);
+    CREATE INDEX idx_execution_history_parent ON execution_history(parent_execution_id) WHERE parent_execution_id IS NOT NULL;
+
+
+    -- ============================================================================
+    -- Scheduler State Table: Tracks scheduler instance state
+    -- ============================================================================
+    CREATE TABLE scheduler_state (
+        instance_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        instance_name VARCHAR(255) NOT NULL,
+        hostname VARCHAR(255),
+
+        -- State
+        status VARCHAR(50) NOT NULL CHECK (status IN ('running', 'stopped', 'error')),
+        started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_heartbeat TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        stopped_at TIMESTAMP,
+
+        -- Configuration snapshot
+        config_snapshot JSONB,
+
+        -- Statistics
+        total_jobs_scheduled INTEGER DEFAULT 0,
+        total_executions INTEGER DEFAULT 0,
+
+        -- Version info
+        version VARCHAR(50)
+    );
+
+    CREATE INDEX idx_scheduler_state_heartbeat ON scheduler_state(last_heartbeat DESC);
+
+
+    -- ============================================================================
+    -- Audit Log Table: Tracks configuration changes
+    -- ============================================================================
+    CREATE TABLE audit_log (
+        audit_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        -- What changed
+        entity_type VARCHAR(50) NOT NULL,  -- 'job', 'scheduler', etc.
+        entity_id UUID,
+        action VARCHAR(50) NOT NULL CHECK (action IN ('create', 'update', 'delete', 'enable', 'disable')),
+
+        -- Who made the change
+        user_id VARCHAR(100),
+        source VARCHAR(50),  -- 'api', 'cli', 'internal'
+
+        -- Change details
+        old_value JSONB,
+        new_value JSONB,
+        changes JSONB,  -- Specific fields that changed
+
+        -- Context
+        ip_address INET,
+        user_agent TEXT
+    );
+
+    CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp DESC);
+    CREATE INDEX idx_audit_log_entity ON audit_log(entity_type, entity_id);
+
+
+    -- ============================================================================
+    -- Views for Common Queries
+    -- ============================================================================
+
+    -- Active jobs with their next scheduled run
+    CREATE VIEW v_active_jobs AS
+    SELECT
+        sj.job_id,
+        sj.job_name,
+        sj.warehouse,
+        sj.agent_type,
+        sj.run_mode,
+        sj.schedule_type,
+        sj.cron_expression,
+        sj.next_run_at,
+        sj.last_run_at,
+        COUNT(eh.execution_id) FILTER (WHERE eh.status = 'completed') as successful_runs,
+        COUNT(eh.execution_id) FILTER (WHERE eh.status = 'failed') as failed_runs,
+        MAX(eh.end_time) as last_execution_time
+    FROM scheduled_jobs sj
+    LEFT JOIN execution_history eh ON sj.job_id = eh.job_id
+    WHERE sj.enabled = true
+    GROUP BY sj.job_id;
+
+
+    -- Recent execution summary
+    CREATE VIEW v_recent_executions AS
+    SELECT
+        eh.execution_id,
+        eh.job_id,
+        sj.job_name,
+        sj.warehouse,
+        sj.agent_type,
+        sj.run_mode,
+        eh.start_time,
+        eh.end_time,
+        eh.duration_seconds,
+        eh.status,
+        eh.trigger_type,
+        eh.retry_count
+    FROM execution_history eh
+    JOIN scheduled_jobs sj ON eh.job_id = sj.job_id
+    ORDER BY eh.start_time DESC
+    LIMIT 100;
+
+
+    -- Job execution statistics
+    CREATE VIEW v_job_statistics AS
+    SELECT
+        sj.job_id,
+        sj.job_name,
+        sj.warehouse,
+        sj.agent_type,
+        COUNT(eh.execution_id) as total_executions,
+        COUNT(eh.execution_id) FILTER (WHERE eh.status = 'completed') as successful_executions,
+        COUNT(eh.execution_id) FILTER (WHERE eh.status = 'failed') as failed_executions,
+        AVG(eh.duration_seconds) FILTER (WHERE eh.status = 'completed') as avg_duration_seconds,
+        MAX(eh.duration_seconds) FILTER (WHERE eh.status = 'completed') as max_duration_seconds,
+        MIN(eh.duration_seconds) FILTER (WHERE eh.status = 'completed') as min_duration_seconds,
+        sj.last_run_at,
+        sj.next_run_at
+    FROM scheduled_jobs sj
+    LEFT JOIN execution_history eh ON sj.job_id = eh.job_id
+    GROUP BY sj.job_id;
+
+
+    -- ============================================================================
+    -- Functions and Triggers
+    -- ============================================================================
+
+    -- Function to update updated_at timestamp
+    CREATE OR REPLACE FUNCTION update_updated_at_column()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        NEW.updated_at = CURRENT_TIMESTAMP;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    -- Trigger for scheduled_jobs
+    CREATE TRIGGER update_scheduled_jobs_updated_at
+        BEFORE UPDATE ON scheduled_jobs
+        FOR EACH ROW
+        EXECUTE FUNCTION update_updated_at_column();
+
+
+    -- Function to calculate next run time (basic implementation)
+    CREATE OR REPLACE FUNCTION calculate_next_run(
+        p_schedule_type VARCHAR,
+        p_cron_expression VARCHAR,
+        p_interval_seconds INTEGER,
+        p_scheduled_date TIMESTAMP,
+        p_last_run_at TIMESTAMP
+    )
+    RETURNS TIMESTAMP AS $$
+    BEGIN
+        CASE p_schedule_type
+            WHEN 'interval' THEN
+                RETURN COALESCE(p_last_run_at, CURRENT_TIMESTAMP) + (p_interval_seconds || ' seconds')::INTERVAL;
+            WHEN 'date' THEN
+                RETURN p_scheduled_date;
+            ELSE
+                -- For cron, this would need a more complex implementation
+                -- APScheduler will handle this in application code
+                RETURN NULL;
+        END CASE;
+    END;
+    $$ LANGUAGE plpgsql;
+
+
+    -- ============================================================================
+    -- Initial Data / Examples
+    -- ============================================================================
+
+    -- Example: Daily training job for Kilcock warehouse
+    INSERT INTO scheduled_jobs (
+        job_name,
+        description,
+        warehouse,
+        agent_type,
+        run_mode,
+        schedule_type,
+        cron_expression,
+        timezone,
+        env_overrides
+    ) VALUES (
+        'kilcock_daily_training',
+        'Daily training run for Kilcock warehouse Pick Release agent',
+        'Kilcock',
+        'Pick Release',
+        'train_agent',
+        'cron',
+        '0 2 * * *',  -- 2 AM daily
+        'UTC',
+        '{"AGENT_DATA_STORE_URL": "https://agent-db-api.csnx.dci.app", "LOGGING_SERVICE_URL": "https://agent-db-api.csnx.dci.app"}'::jsonb
+    );
+
+    -- Example: Hourly production run
+    INSERT INTO scheduled_jobs (
+        job_name,
+        description,
+        warehouse,
+        agent_type,
+        run_mode,
+        schedule_type,
+        cron_expression,
+        timezone
+    ) VALUES (
+        'kilcock_hourly_run',
+        'Hourly production run for Kilcock warehouse',
+        'Kilcock',
+        'Pick Release',
+        'run_agent',
+        'cron',
+        '0 * * * *',  -- Every hour
+        'UTC'
+    );
