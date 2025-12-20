@@ -21,10 +21,17 @@ data:
         job_name VARCHAR(255) NOT NULL UNIQUE,
         description TEXT,
 
-        -- Agent execution parameters
-        warehouse VARCHAR(100) NOT NULL,
-        agent_type VARCHAR(100) NOT NULL,
-        run_mode VARCHAR(50) NOT NULL CHECK (run_mode IN ('train_agent', 'run_agent')),
+        -- Job type: 'agent' (default), 'script', or 'command'
+        job_type VARCHAR(50) NOT NULL DEFAULT 'agent' CHECK (job_type IN ('agent', 'script', 'command')),
+
+        -- Agent execution parameters (required for job_type='agent')
+        warehouse VARCHAR(100),
+        agent_type VARCHAR(100),
+        run_mode VARCHAR(50) CHECK (run_mode IS NULL OR run_mode IN ('train_agent', 'run_agent')),
+
+        -- Command/Script configuration (for job_type='script' or 'command')
+        -- Structure: {"image": "...", "command": [...], "args": [...], "env": {...}}
+        command_config JSONB DEFAULT '{}'::jsonb,
 
         -- Scheduling
         schedule_type VARCHAR(50) NOT NULL CHECK (schedule_type IN ('cron', 'interval', 'date')),
@@ -66,6 +73,10 @@ data:
             (schedule_type = 'cron' AND cron_expression IS NOT NULL) OR
             (schedule_type = 'interval' AND interval_seconds IS NOT NULL) OR
             (schedule_type = 'date' AND scheduled_date IS NOT NULL)
+        ),
+        CONSTRAINT valid_job_config CHECK (
+            (job_type = 'agent' AND warehouse IS NOT NULL AND agent_type IS NOT NULL AND run_mode IS NOT NULL) OR
+            (job_type IN ('script', 'command') AND command_config IS NOT NULL)
         )
     );
 
@@ -73,6 +84,7 @@ data:
     CREATE INDEX idx_scheduled_jobs_enabled ON scheduled_jobs(enabled);
     CREATE INDEX idx_scheduled_jobs_next_run ON scheduled_jobs(next_run_at) WHERE enabled = true;
     CREATE INDEX idx_scheduled_jobs_warehouse ON scheduled_jobs(warehouse);
+    CREATE INDEX idx_scheduled_jobs_job_type ON scheduled_jobs(job_type);
 
 
     -- ============================================================================
