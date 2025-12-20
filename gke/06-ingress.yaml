@@ -1,0 +1,65 @@
+# GKE Ingress with Google Cloud Load Balancer
+#
+# Prerequisites:
+# 1. Reserve static IP: gcloud compute addresses create scheduler-ip --global
+# 2. Create ManagedCertificate (see 06-managed-cert.yaml)
+# 3. Configure DNS to point to the static IP
+#
+# Note: GKE uses Google Cloud HTTP(S) Load Balancer by default
+# Path matching differs from nginx - uses prefix matching
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scheduler-ingress
+  namespace: agent-scheduler
+  labels:
+    app: scheduler
+  annotations:
+    # Use GKE ingress class (Google Cloud Load Balancer)
+    kubernetes.io/ingress.class: "gce"
+    # Static IP reservation name
+    kubernetes.io/ingress.global-static-ip-name: "scheduler-ip"
+    # Reference to managed SSL certificate
+    networking.gke.io/managed-certificates: "scheduler-cert"
+    # Redirect HTTP to HTTPS
+    kubernetes.io/ingress.allow-http: "false"
+spec:
+  rules:
+    # Update with your domain
+    - host: "${SCHEDULER_DOMAIN}"
+      http:
+        paths:
+          # Admin API routes - rewriting handled by backend
+          - path: /admin/api/*
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: agent-db-service
+                port:
+                  number: 8000
+          # Admin UI routes
+          - path: /admin/*
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: agent-ctl-service
+                port:
+                  number: 3000
+          # Scheduler API routes
+          - path: /api/*
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: scheduler-service
+                port:
+                  number: 8000
+          # UI catch-all (must be last)
+          - path: /*
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: ui-service
+                port:
+                  number: 80

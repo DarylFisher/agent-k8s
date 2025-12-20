@@ -1,0 +1,89 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-ctl-config
+  namespace: agent-scheduler
+  labels:
+    app: agent-ctl
+data:
+  # API URL accessible from browser via Ingress
+  # This routes through /admin/api which is rewritten to / and sent to agent-db-service
+  VITE_REACT_APP_AGENT_API_URL: "/admin/api"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-ctl-service
+  namespace: agent-scheduler
+  labels:
+    app: agent-ctl
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
+      name: http
+  selector:
+    app: agent-ctl
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-ctl
+  namespace: agent-scheduler
+  labels:
+    app: agent-ctl
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-ctl
+  template:
+    metadata:
+      labels:
+        app: agent-ctl
+    spec:
+      containers:
+        - name: agent-ctl
+          # Update with your Artifact Registry path:
+          # ${REGION}-docker.pkg.dev/${PROJECT_ID}/agent-scheduler/agent-ctl:latest
+          image: REGISTRY_PATH/agent-ctl:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: VITE_REACT_APP_AGENT_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-ctl-config
+                  key: VITE_REACT_APP_AGENT_API_URL
+            - name: NODE_ENV
+              value: "production"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /admin
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /admin
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3

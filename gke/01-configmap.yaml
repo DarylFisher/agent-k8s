@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scheduler-config
+  namespace: agent-scheduler
+  labels:
+    app: scheduler
+data:
+  # Application Configuration
+  ENVIRONMENT: "production"
+  APPLICATION_NAME: "Agent Scheduler"
+  LOG_LEVEL: "info"
+
+  # API Configuration
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  API_PREFIX: "/api/v1"
+  METRICS_PORT: "9090"
+
+  # Database Configuration
+  DATABASE_HOST: "postgres-service"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "scheduler_db"
+
+  # Scheduler Configuration
+  SCHEDULER_TIMEZONE: "UTC"
+  SCHEDULER_THREAD_POOL_SIZE: "20"
+  SCHEDULER_MISFIRE_GRACE_TIME: "60"
+  MAX_CONCURRENT_JOBS: "10"
+
+  # Kubernetes Configuration
+  KUBERNETES_NAMESPACE: "agent-scheduler"
+  KUBERNETES_JOB_TTL: "3600"
+  KUBERNETES_IN_CLUSTER: "true"
+
+  # Agent Configuration
+  # Note: Update DEFAULT_AGENT_IMAGE to your Artifact Registry path
+  DEFAULT_AGENT_IMAGE: "pkanal:latest"
+  DEFAULT_CONTAINER_MEMORY: "2Gi"
+  DEFAULT_CONTAINER_CPU: "1000m"
+
+  # External Services
+  AGENT_DATA_STORE_URL: "http://agent-db-service:8000"
+  LOGGING_SERVICE_URL: "http://agent-db-service:8000"
+
+  # CORS Configuration - Update with your domain
+  # Format: SCHEDULER_DOMAIN environment variable is substituted at deploy time
+  CORS_ALLOWED_ORIGINS: '["https://${SCHEDULER_DOMAIN}"]'
+
+  # Retention Configuration
+  EXECUTION_HISTORY_RETENTION_DAYS: "90"
+  JOB_CLEANUP_ENABLED: "true"

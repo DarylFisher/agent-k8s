@@ -1,0 +1,21 @@
+# Google-managed SSL Certificate
+#
+# This creates a free SSL certificate managed by Google.
+# The certificate will auto-provision once:
+# 1. DNS is configured to point to the load balancer IP
+# 2. The ingress is created and healthy
+#
+# Provisioning can take 15-60 minutes after DNS is configured.
+# Check status: kubectl describe managedcertificate scheduler-cert -n agent-scheduler
+
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: scheduler-cert
+  namespace: agent-scheduler
+  labels:
+    app: scheduler
+spec:
+  domains:
+    # Update with your domain
+    - "${SCHEDULER_DOMAIN}"

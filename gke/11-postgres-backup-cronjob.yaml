@@ -1,0 +1,94 @@
+# PostgreSQL Backup CronJob
+#
+# Performs daily backups of the scheduler database.
+# Backups are stored in a PVC that should be configured for your needs.
+#
+# For production, consider:
+# - Uploading backups to Google Cloud Storage
+# - Setting up backup retention policies
+# - Monitoring backup success/failure
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backup-pvc
+  namespace: agent-scheduler
+  labels:
+    app: postgres-backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard-rwo
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: agent-scheduler
+  labels:
+    app: postgres-backup
+spec:
+  # Run daily at 2 AM UTC
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: postgres-backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: postgres:15-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  BACKUP_FILE="/backup/scheduler-$(date +%Y%m%d-%H%M%S).sql.gz"
+                  echo "Starting backup to ${BACKUP_FILE}..."
+                  pg_dump -h postgres-service -U ${PGUSER} -d ${PGDATABASE} | gzip > ${BACKUP_FILE}
+                  echo "Backup completed: ${BACKUP_FILE}"
+                  ls -lh /backup/
+                  # Keep only last 7 days of backups
+                  find /backup -name "scheduler-*.sql.gz" -mtime +7 -delete
+                  echo "Cleanup completed"
+              env:
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: scheduler-secrets
+                      key: DATABASE_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: scheduler-secrets
+                      key: DATABASE_PASSWORD
+                - name: PGDATABASE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: scheduler-config
+                      key: DATABASE_NAME
+              volumeMounts:
+                - name: backup-volume
+                  mountPath: /backup
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
+          volumes:
+            - name: backup-volume
+              persistentVolumeClaim:
+                claimName: postgres-backup-pvc
