@@ -70,6 +70,9 @@ spec:
                 secretKeyRef:
                   name: scheduler-secrets
                   key: DATABASE_PASSWORD
+            # URL prefix for GKE ingress (path is passed as-is, no rewriting)
+            - name: API_URL_PREFIX
+              value: "/admin/api"
           resources:
             requests:
               memory: "256Mi"
@@ -79,7 +82,7 @@ spec:
               cpu: "1000m"
           livenessProbe:
             httpGet:
-              path: /warehouses
+              path: /admin/api/warehouses
               port: 8000
             initialDelaySeconds: 30
             periodSeconds: 30
@@ -87,7 +90,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /warehouses
+              path: /admin/api/warehouses
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 10
